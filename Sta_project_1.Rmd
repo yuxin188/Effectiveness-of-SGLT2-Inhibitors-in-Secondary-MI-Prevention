@@ -1,0 +1,205 @@
+---
+title: "Sta_Project_1"
+author: "Yuxin Li"
+date: "2025-12-14"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+# import packages for analysis and plots
+library(survival)
+library(ggplot2)
+library(survminer)  
+library(lubridate)
+
+
+# import data
+sglt2_data <- read.csv("/Users/yuxin/Desktop/ic/intro to sat/project1/mi_sglt2.csv")
+
+# checking missing value
+vars_to_check <- c("age", "sex", "bmi_bl", "sbp_bl", "sbp_fup", "mi_flg", "alloc")
+# Number of missing values for each variable
+for (v in vars_to_check) {
+  cat(v, ":", sum(is.na(sglt2_data[[v]])), "\n")
+}
+
+# Check total number of rows and unique IDs
+nrow(sglt2_data)
+length(unique(sglt2_data$id))
+```
+
+
+### Aim1
+
+##### part1: Does participant age or sex affect adherence to SGLT2 inhibitors?
+
+```{r}
+# create a new dataset which only contains participants allocated to SGLT2 inhibitors for analyses of adherence
+sglt2_arm <- subset(sglt2_data, alloc == "SGLT2")
+
+# check adherence variable
+#table(sglt2_arm$adherence_flg, useNA = "ifany")
+#table(sglt2_arm$sex, useNA = "ifany")
+#summary(sglt2_arm$age)
+#sum(is.na(sglt2_arm$age))
+
+# fit the logistic regression 
+fit_1 <- glm(adherence_flg ~ age + sex + bmi_bl, family=binomial(), data=sglt2_arm)
+summary(fit_1)
+exp(coef(fit_1))
+exp(confint(fit_1))
+
+
+```
+
+### Aim2
+
+##### part1 Whether SGLT2 inhibitors affected incidence of secondary MI
+
+```{r}
+
+# factor as date
+sglt2_data$randomisation_dte <- as.Date(sglt2_data$randomisation_dte)
+sglt2_data$mi_dte <- as.Date(sglt2_data$mi_dte)
+sglt2_data$endfup_dte <- as.Date(sglt2_data$endfup_dte)
+
+# duration for participants who develop MI 
+time_to_mi <- difftime(sglt2_data$mi_dte, sglt2_data$randomisation_dte, units = "days")
+
+# duration for participants who do not develop MI 
+time_to_censor <- difftime(sglt2_data$endfup_dte, sglt2_data$randomisation_dte, units = "days")
+
+# duration for two possible outcomes 
+sglt2_data$time_to_mi_or_censor <- as.numeric(ifelse(sglt2_data$mi_flg == 1, time_to_mi, time_to_censor))
+
+# median time
+median(sglt2_data$time_to_mi_or_censor)
+
+# change ref to Usual Care
+sglt2_data$alloc <- factor(sglt2_data$alloc)
+sglt2_data$alloc <- relevel(sglt2_data$alloc, ref = "Usual Care")
+
+fit_2 <- coxph(formula = Surv(time_to_mi_or_censor, mi_flg) ~ alloc, data = sglt2_data)
+
+summary(fit_2)
+exp(confint((fit_2)))
+```
+
+##### K-M curve
+```{r}
+km_fit <- survfit(Surv(time_to_mi_or_censor, mi_flg) ~ alloc, data = sglt2_data)
+km_plot <- ggsurvplot(
+  km_fit,
+  data = sglt2_data,
+  conf.int = FALSE,
+  censor = TRUE,
+  
+  xlab = "Time since randomisation (years)",
+  ylab = "MI-free probability",
+  break.time.by = 365,
+  xscale = "d_y",
+
+  legend.title = "Treatment group",
+  legend.labs = c("Usual care", "SGLT2 inhibitors"),
+  legend = "top",
+
+  palette = c("blue", "red"),
+  ggtheme = theme_bw(base_size = 12)
+)
+
+km_plot$plot <- km_plot$plot +
+  theme(
+    legend.title = element_text(size = 11),
+    legend.text  = element_text(size = 10),
+    axis.title   = element_text(size = 12),
+    axis.text    = element_text(size = 10),
+    panel.grid.major = element_line(colour = "grey90", linewidth = 0.4),
+    panel.grid.minor = element_line(colour = "grey90",linewidth = 0.4)
+  )
+
+km_plot
+plot(cox.zph(fit_2))
+```
+
+##### part2 analysis of the main trial outcomes by sex
+
+```{r}
+fit_3 <- coxph(formula = Surv(time_to_mi_or_censor, mi_flg) ~ alloc* sex, data = sglt2_data)
+summary(fit_3)
+```
+
+##### part3 interaction with time
+
+```{r}
+
+# time split (0 to 1.5), (1.5 to 5)
+tcuts <- c(1.5*365.25) #transfer to days
+time_split <- survSplit(Surv(time_to_mi_or_censor, mi_flg) ~ .,
+                        data = sglt2_data,
+                        cut = tcuts,
+                        episode = "period")
+
+time_split$period <- factor(time_split$period, levels = c(1,2),
+                             labels = c("0–1.5y","1.5–5y"))
+
+fit_4 <- coxph(formula = Surv(tstart, time_to_mi_or_censor, mi_flg) ~ alloc * period, data = time_split)
+
+summary(fit_4)
+```
+
+```{r}
+# HR in each period from the time-split interaction model
+b  <- coef(fit_4)
+V  <- vcov(fit_4)
+
+# 0–1.5 years: exp(beta_alloc)
+hr_0_15 <- exp(b["allocSGLT2"])
+ci_0_15 <- exp(confint(fit_4)["allocSGLT2", ])
+p_0_15  <- summary(fit_4)$coefficients["allocSGLT2", "Pr(>|z|)"]
+
+# 1.5–5 years: exp(beta_alloc + beta_interaction)
+L <- c(allocSGLT2 = 1, `allocSGLT2:period1.5–5y` = 1)
+beta <- b[names(L)]
+Vsub <- V[names(L), names(L)]
+est  <- sum(L * beta)
+se   <- sqrt(t(L) %*% Vsub %*% L)
+
+hr_15_5 <- exp(est)
+ci_15_5 <- exp(c(est - 1.96 * se, est + 1.96 * se))
+p_15_5  <- 2 * pnorm(-abs(est / se))
+
+list(
+  `0-1.5y` = c(HR = hr_0_15,  LCL = ci_0_15[1], UCL = ci_0_15[2], p = p_0_15),
+  `1.5-5y` = c(HR = hr_15_5, LCL = ci_15_5[1], UCL = ci_15_5[2], p = p_15_5)
+)
+
+```
+
+### AIm3
+
+##### part1 Whether SGLT2 inhibitors affected systolic blood pressure at the interim assessment.
+
+```{r}
+sglt2_data$alloc <- relevel(factor(sglt2_data$alloc), ref="Usual Care")
+
+fit_5 <- lm(sbp_fup ~ alloc + sbp_bl, data = sglt2_data)
+summary(fit_5)
+confint((fit_5))
+```
+
+##### part2 analysis of the main trial outcomes by sex
+
+```{r}
+
+fit_6 <- lm(sbp_fup ~ alloc * sex + sbp_bl, data = sglt2_data)
+summary(fit_6)
+confint(fit_6)
+```
+
+
